@@ -2,33 +2,36 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Telegram Full Pro</title>
+<title>Firebase Messenger Pro</title>
 <style>
 body{margin:0;background:#0a0a0a;color:#0f0;font-family:monospace;display:flex;justify-content:center}
 #app{width:100%;max-width:700px;padding:10px}
 input,button{width:100%;padding:10px;margin:5px 0;background:#000;color:#0f0;border:1px solid #0f0}
 .chat{height:420px;overflow:auto;border:1px solid #0f0;padding:10px}
 .msg{padding:6px;border-bottom:1px solid #0f0;position:relative}
-.me{color:#00ffff}
+.me{color:#0ff}
 .small{font-size:11px;opacity:0.7}
+.del{position:absolute;right:5px;top:5px;color:red;cursor:pointer;font-size:10px}
 .row{display:flex;gap:5px}
 .row input{flex:1}
-.badge{font-size:10px;color:#0f0;opacity:0.7}
-.del{position:absolute;right:5px;top:5px;color:#f55;cursor:pointer;font-size:10px}
 </style>
 </head>
 <body>
 
 <div id="app">
-<h2>🔐 TELEGRAM FULL PRO</h2>
+
+<h2>🔥 FIREBASE MESSENGER PRO</h2>
 
 <div id="login">
   <input id="room" placeholder="Room name">
   <input id="name" placeholder="Your name">
-  <button onclick="join()">Join room</button>
+
+  <button onclick="createRoom()">Create room</button>
+  <button onclick="joinRoom()">Join room</button>
 </div>
 
 <div id="chatBox" style="display:none;">
+
   <div class="small" id="info"></div>
 
   <div class="chat" id="chat"></div>
@@ -50,7 +53,7 @@ input,button{width:100%;padding:10px;margin:5px 0;background:#000;color:#0f0;bor
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
 import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-import { getDatabase, ref, push, onValue, set, remove, update } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+import { getDatabase, ref, set, push, onValue, remove } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
 import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-storage.js";
 
 const firebaseConfig = {
@@ -69,21 +72,38 @@ const storage=getStorage(app);
 
 await signInAnonymously(auth);
 
-let room,name,key="secret";
+let room,name;
 
 function enc(t){return btoa(unescape(encodeURIComponent(t)))}
 function dec(t){try{return decodeURIComponent(escape(atob(t)))}catch{return t}}
 
-window.join=function(){
+window.createRoom=function(){
   room=document.getElementById("room").value.trim();
   name=document.getElementById("name").value.trim();
   if(!room||!name) return alert("fill");
 
+  set(ref(db,"rooms/"+room),{
+    created:true,
+    createdAt:Date.now()
+  });
+
+  enter();
+}
+
+window.joinRoom=function(){
+  room=document.getElementById("room").value.trim();
+  name=document.getElementById("name").value.trim();
+  if(!room||!name) return alert("fill");
+
+  enter();
+}
+
+function enter(){
   document.getElementById("login").style.display="none";
   document.getElementById("chatBox").style.display="block";
   document.getElementById("info").innerText="Room: "+room;
 
-  set(ref(db,"rooms/"+room+"/users/"+name),{online:true,time:Date.now()});
+  set(ref(db,"rooms/"+room+"/users/"+name),{online:true});
 
   listen();
   typing();
@@ -110,9 +130,9 @@ function listen(){
       }
 
       div.innerHTML=`
-        <span class="badge">${m.user}</span><br>
+        <b>${m.user}</b><br>
         ${content}
-        <div class="del" onclick="delMsg('${id}')">x</div>
+        <div class="del" onclick="del('${id}')">x</div>
       `;
 
       chat.appendChild(div);
@@ -133,22 +153,7 @@ window.send=function(){
     time:Date.now()
   });
 
-  set(ref(db,"rooms/"+room+"/typing/"+name),false);
   document.getElementById("msg").value="";
-}
-
-document.getElementById("msg").oninput=()=>{
-  set(ref(db,"rooms/"+room+"/typing/"+name),true);
-  setTimeout(()=>set(ref(db,"rooms/"+room+"/typing/"+name),false),800);
-}
-
-function typing(){
-  onValue(ref(db,"rooms/"+room+"/typing"),snap=>{
-    const d=snap.val()||{};
-    const arr=Object.keys(d).filter(u=>d[u]&&u!==name);
-    document.getElementById("typing").innerText=
-      arr.length?arr.join(", ")+" typing...":"";
-  });
 }
 
 window.sendFile=async function(){
@@ -167,8 +172,22 @@ window.sendFile=async function(){
   });
 }
 
-window.delMsg=function(id){
+window.del=function(id){
   remove(ref(db,"rooms/"+room+"/msgs/"+id));
+}
+
+function typing(){
+  onValue(ref(db,"rooms/"+room+"/typing"),snap=>{
+    const d=snap.val()||{};
+    const arr=Object.keys(d).filter(u=>d[u]&&u!==name);
+    document.getElementById("typing").innerText=
+      arr.length?arr.join(", ")+" typing...":"";
+  });
+}
+
+document.getElementById("msg").oninput=()=>{
+  set(ref(db,"rooms/"+room+"/typing/"+name),true);
+  setTimeout(()=>set(ref(db,"rooms/"+room+"/typing/"+name),false),800);
 }
 
 window.leave=function(){
