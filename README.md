@@ -3,14 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>MARAUDER | ENCRYPTED CHAT</title>
-    <!-- Firebase SDKs -->
+    <title>MARAUDER | SECURE CHAT</title>
     <script type="importmap">
         {
             "imports": {
                 "firebase/app": "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js",
-                "firebase/database": "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js",
-                "firebase/storage": "https://www.gstatic.com/firebasejs/10.8.0/firebase-storage.js"
+                "firebase/auth": "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js",
+                "firebase/database": "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js"
             }
         }
     </script>
@@ -225,6 +224,7 @@
             color: #00ff66;
             text-align: center;
             margin: 10px 0;
+            word-break: break-all;
         }
         .status-text {
             font-size: 13px;
@@ -330,6 +330,7 @@
         ::-webkit-scrollbar-track { background: #0a0a0a; }
         ::-webkit-scrollbar-thumb { background: #00ff66; border-radius: 10px; }
         .error-msg { color: #ff6666; font-size: 12px; margin-top: 8px; text-align: center; }
+        .info-msg { color: #00aa66; font-size: 12px; margin-top: 8px; text-align: center; }
     </style>
 </head>
 <body>
@@ -337,8 +338,8 @@
     <div class="hacker-header">
         <div class="glitch-title" id="animatedTitle">MARAUDER</div>
         <div class="status-bar">
-            <span>[ FIREBASE ]</span>
-            <span>[ REALTIME ]</span>
+            <span>[ SECURE ]</span>
+            <span>[ AES-GCM ]</span>
             <span>[ 1v1 ROOMS ]</span>
         </div>
     </div>
@@ -347,9 +348,10 @@
 
 <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
-    import { getDatabase, ref, set, onValue, push, off, get, update } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+    import { getDatabase, ref, set, onValue, push, off, get, remove, update } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
 
-    // ========== FIREBASE CONFIG (REPLACE WITH YOUR OWN) ==========
+    // ========== FIREBASE CONFIG (ЗАМЕНИТЕ НА ВАШУ) ==========
     const firebaseConfig = {
         apiKey: "AIzaSyB5F5R5tL9zEf7X9k8wJq3Vp0yLmN2qR6sT",
         authDomain: "marauder-arena-demo.firebaseapp.com",
@@ -360,42 +362,135 @@
         databaseURL: "https://marauder-arena-demo-default-rtdb.firebaseio.com"
     };
     
-    let app, db;
-    let firebaseReady = false;
-    try {
-        app = initializeApp(firebaseConfig);
-        db = getDatabase(app);
-        firebaseReady = true;
-        console.log("✅ Firebase initialized");
-    } catch(e) { console.error("Firebase error:", e); }
+    // ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
+    let app, auth, db;
+    let firebaseUser = null;
+    let currentUserId = null;
+    let currentNickname = null;
+    let currentRoomId = null;
+    let currentIsHost = false;
+    let cryptoKey = null;
+    let roomUnsubscribe = null;
+    let messagesUnsubscribe = null;
+    let titleAnimationTimer = null;
+    let titleTimeout = null;
     
-    // ========== ANIMATED TITLE ==========
-    const titlePhrases = ["MARAUDER", "it's not to test", "wanna hack tesla?", "🪴?"];
+    // ========== АНИМАЦИЯ ЗАГОЛОВКА ==========
+    const titlePhrases = ["MARAUDER", "SECURE CHAT", "AES-GCM", "1v1 ENCRYPTED"];
     let phraseIdx = 0, charPos = 0, isDeleting = false;
     const titleEl = document.getElementById("animatedTitle");
+    
+    function stopTitleAnimation() {
+        if (titleAnimationTimer) clearTimeout(titleAnimationTimer);
+        if (titleTimeout) clearTimeout(titleTimeout);
+        titleAnimationTimer = null;
+        titleTimeout = null;
+    }
+    
     function animateTitle() {
         if (!titleEl) return;
         const full = titlePhrases[phraseIdx];
         if (!isDeleting && charPos < full.length) {
             charPos++;
             titleEl.innerText = full.slice(0, charPos) + "▌";
-            setTimeout(animateTitle, 100);
+            titleAnimationTimer = setTimeout(animateTitle, 100);
         } else if (!isDeleting && charPos === full.length) {
             titleEl.innerText = full;
-            setTimeout(() => { isDeleting = true; animateTitle(); }, 10000);
+            titleTimeout = setTimeout(() => { isDeleting = true; animateTitle(); }, 3000);
         } else if (isDeleting && charPos > 0) {
             charPos--;
             titleEl.innerText = full.slice(0, charPos) + "█";
-            setTimeout(animateTitle, 50);
+            titleAnimationTimer = setTimeout(animateTitle, 50);
         } else if (isDeleting && charPos === 0) {
             isDeleting = false;
             phraseIdx = (phraseIdx + 1) % titlePhrases.length;
             animateTitle();
         }
     }
-    animateTitle();
     
-    // ========== HELPERS ==========
+    // ========== КРИПТОГРАФИЯ AES-GCM ==========
+    async function generateRoomKey() {
+        return await crypto.subtle.generateKey(
+            { name: "AES-GCM", length: 256 },
+            true,
+            ["encrypt", "decrypt"]
+        );
+    }
+    
+    async function exportKey(key) {
+        const raw = await crypto.subtle.exportKey("raw", key);
+        return btoa(String.fromCharCode(...new Uint8Array(raw)));
+    }
+    
+    async function importKey(base64Key) {
+        if (!base64Key) throw new Error("No key provided");
+        const raw = Uint8Array.from(atob(base64Key), c => c.charCodeAt(0));
+        return await crypto.subtle.importKey(
+            "raw",
+            raw,
+            { name: "AES-GCM", length: 256 },
+            true,
+            ["encrypt", "decrypt"]
+        );
+    }
+    
+    function base64ToBuffer(base64) {
+        if (!base64) return null;
+        try {
+            const binary = atob(base64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            return bytes;
+        } catch (e) {
+            console.warn("base64 decode failed:", e);
+            return null;
+        }
+    }
+    
+    function bufferToBase64(buffer) {
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+    }
+    
+    async function encryptMessage(key, text) {
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const encoder = new TextEncoder();
+        const encrypted = await crypto.subtle.encrypt(
+            { name: "AES-GCM", iv: iv },
+            key,
+            encoder.encode(text)
+        );
+        return {
+            iv: bufferToBase64(iv),
+            data: bufferToBase64(encrypted)
+        };
+    }
+    
+    async function decryptMessage(key, ivBase64, dataBase64) {
+        if (!key || !ivBase64 || !dataBase64) return null;
+        try {
+            const iv = base64ToBuffer(ivBase64);
+            const data = base64ToBuffer(dataBase64);
+            if (!iv || !data) return null;
+            const decrypted = await crypto.subtle.decrypt(
+                { name: "AES-GCM", iv: iv },
+                key,
+                data
+            );
+            return new TextDecoder().decode(decrypted);
+        } catch (e) {
+            console.warn("Decrypt failed:", e);
+            return null;
+        }
+    }
+    
+    // ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
     function getDeviceInfo() {
         const ua = navigator.userAgent;
         if (/iPhone|iPad|iPod/i.test(ua)) return "📱 iOS";
@@ -404,106 +499,203 @@
         if (/Mac/i.test(ua)) return "🍎 Mac";
         return "💻 PC";
     }
-    function generateRoomId() { return Math.random().toString(36).substring(2, 10).toUpperCase(); }
-    function generateUserId() { return Date.now().toString(36) + Math.random().toString(36).substring(2, 6); }
-    function isValidRoomId(id) { return /^[A-Z0-9]{8}$/.test(id); }
     
-    // ========== CAPTCHA ==========
-    const captchaWords = ["ROOT", "HACKER", "CYBER", "CRYPTO", "SHELL", "BYTE", "ZERO", "ALPHA", "OMEGA", "GHOST", "MATRIX", "NEO", "TRINITY"];
-    function generateCaptcha() {
-        const word = captchaWords[Math.floor(Math.random() * captchaWords.length)];
-        const shuffled = word.split('').sort(() => Math.random() - 0.5).join('');
-        return { original: word, display: shuffled };
-    }
-    function generateWordPuzzle() {
-        const target = captchaWords[Math.floor(Math.random() * captchaWords.length)];
-        const letters = target.split('');
-        const shuffled = [...letters].sort(() => Math.random() - 0.5);
-        return { target: target, letters: shuffled };
+    function generateRoomId() {
+        return Math.random().toString(36).substring(2, 10).toUpperCase();
     }
     
-    // ========== STATE ==========
-    let currentUser = { nickname: null, roomId: null, isHost: false, userId: null, device: getDeviceInfo() };
-    let roomUnsubscribe = null;
-    let messagesUnsubscribe = null;
+    function isValidRoomId(id) {
+        return /^[A-Z0-9]{8}$/.test(id);
+    }
     
-    // ========== FIREBASE ROOM FUNCTIONS ==========
-    async function createRoom(hostNick, device) {
+    function escapeHtml(str) {
+        if (!str) return '';
+        return str.replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m]));
+    }
+    
+    function showError(msg) {
+        const errDiv = document.getElementById('globalError');
+        if (errDiv) errDiv.innerText = msg;
+        else console.error(msg);
+    }
+    
+    function clearError() {
+        const errDiv = document.getElementById('globalError');
+        if (errDiv) errDiv.innerText = '';
+    }
+    
+    // ========== FIREBASE ROOM ФУНКЦИИ (БЕЗ runTransaction) ==========
+    async function createRoom(nickname, device) {
         const roomId = generateRoomId();
-        const userId = generateUserId();
+        const roomKey = await generateRoomKey();
+        const exportedKey = await exportKey(roomKey);
         
-        const roomRef = ref(db, `rooms/${roomId}`);
-        await set(roomRef, {
-            roomId, status: "waiting",
-            host: { nickname: hostNick, userId, device, joinedAt: Date.now() },
+        const roomData = {
+            roomId: roomId,
+            status: "waiting",
+            host: {
+                nickname: nickname,
+                userId: currentUserId,
+                device: device,
+                joinedAt: Date.now()
+            },
             guest: null,
             createdAt: Date.now(),
-            users: { [userId]: { nickname: hostNick, isHost: true, joinedAt: Date.now(), device } }
-        });
-        console.log("✅ Room created:", roomId);
-        return { success: true, roomId, userId };
+            cryptoKey: exportedKey,
+            users: {
+                [currentUserId]: {
+                    nickname: nickname,
+                    isHost: true,
+                    joinedAt: Date.now(),
+                    device: device
+                }
+            }
+        };
+        
+        const roomRef = ref(db, `rooms/${roomId}`);
+        await set(roomRef, roomData);
+        
+        return { success: true, roomId: roomId, cryptoKey: roomKey };
     }
     
-    async function joinRoom(roomId, guestNick, device) {
-        if (!isValidRoomId(roomId)) return { success: false, error: "Invalid room ID (8 chars, A-Z0-9)" };
-        const roomRef = ref(db, `rooms/${roomId}`);
-        const snap = await get(roomRef);
-        if (!snap.exists()) return { success: false, error: "ROOM NOT FOUND" };
-        const room = snap.val();
-        if (room.status === "playing") return { success: false, error: "ROOM IS FULL" };
+    async function joinRoom(roomId, nickname, device) {
+        if (!isValidRoomId(roomId)) {
+            throw new Error("Invalid room ID (8 chars, A-Z0-9)");
+        }
         
-        const userId = generateUserId();
-        await update(roomRef, {
-            guest: { nickname: guestNick, userId, device, joinedAt: Date.now() },
+        const roomRef = ref(db, `rooms/${roomId}`);
+        const snapshot = await get(roomRef);
+        
+        if (!snapshot.exists()) {
+            throw new Error("ROOM NOT FOUND");
+        }
+        
+        const room = snapshot.val();
+        
+        if (room.status === "playing") {
+            throw new Error("ROOM IS FULL");
+        }
+        
+        if (room.guest !== null && room.guest.userId !== currentUserId) {
+            throw new Error("ROOM ALREADY HAS GUEST");
+        }
+        
+        // Обновляем комнату
+        const updatedRoom = {
+            ...room,
+            guest: {
+                nickname: nickname,
+                userId: currentUserId,
+                device: device,
+                joinedAt: Date.now()
+            },
             status: "playing",
-            [`users/${userId}`]: { nickname: guestNick, isHost: false, joinedAt: Date.now(), device }
-        });
+            users: {
+                ...room.users,
+                [currentUserId]: {
+                    nickname: nickname,
+                    isHost: false,
+                    joinedAt: Date.now(),
+                    device: device
+                }
+            }
+        };
         
-        return { success: true, roomId, userId };
+        await set(roomRef, updatedRoom);
+        
+        const cryptoKeyImported = await importKey(room.cryptoKey);
+        return { success: true, roomId: roomId, cryptoKey: cryptoKeyImported };
     }
     
-    async function sendMessage(roomId, text, sender) {
-        if (!text.trim()) return false;
-        const messagesRef = ref(db, `rooms/${roomId}/messages`);
-        await push(messagesRef, {
-            text: text.trim(),
-            sender: sender,
-            timestamp: Date.now()
-        });
-        return true;
-    }
-    
-    async function leaveRoom(roomId, userId, isHost) {
-        if (roomUnsubscribe) off(roomUnsubscribe);
-        if (messagesUnsubscribe) off(messagesUnsubscribe);
+    async function sendEncryptedMessage(roomId, text) {
+        if (!text.trim() || !cryptoKey) return false;
         
-        const roomRef = ref(db, `rooms/${roomId}`);
-        const snap = await get(roomRef);
-        if (!snap.exists()) return;
-        
-        if (isHost) {
-            await set(roomRef, null);
-            console.log("🗑️ Room deleted (host left)");
-        } else {
-            await update(roomRef, {
-                guest: null,
-                status: "waiting",
-                [`users/${userId}`]: null
+        try {
+            const encrypted = await encryptMessage(cryptoKey, text);
+            const messagesRef = ref(db, `rooms/${roomId}/messages`);
+            await push(messagesRef, {
+                encrypted: true,
+                iv: encrypted.iv,
+                data: encrypted.data,
+                sender: currentNickname,
+                timestamp: Date.now()
             });
-            console.log("👋 Guest left room");
+            return true;
+        } catch (e) {
+            console.error("Send message error:", e);
+            return false;
         }
     }
     
-    // ========== UI RENDER ==========
+    async function leaveRoom() {
+        if (roomUnsubscribe) {
+            off(roomUnsubscribe);
+            roomUnsubscribe = null;
+        }
+        if (messagesUnsubscribe) {
+            off(messagesUnsubscribe);
+            messagesUnsubscribe = null;
+        }
+        
+        if (!currentRoomId) return;
+        
+        const roomRef = ref(db, `rooms/${currentRoomId}`);
+        const snapshot = await get(roomRef);
+        
+        if (!snapshot.exists()) {
+            currentRoomId = null;
+            currentIsHost = false;
+            cryptoKey = null;
+            return;
+        }
+        
+        const room = snapshot.val();
+        
+        if (currentIsHost) {
+            // Хост удаляет комнату
+            await remove(roomRef);
+        } else {
+            // Гость покидает комнату
+            const updatedRoom = {
+                ...room,
+                guest: null,
+                status: "waiting"
+            };
+            
+            if (updatedRoom.users && updatedRoom.users[currentUserId]) {
+                delete updatedRoom.users[currentUserId];
+            }
+            
+            await set(roomRef, updatedRoom);
+        }
+        
+        cryptoKey = null;
+        currentRoomId = null;
+        currentIsHost = false;
+    }
+    
+    // ========== UI ОТРИСОВКА ==========
     const contentArea = document.getElementById('contentArea');
-    let activeCaptchaWord = "", activePuzzleTarget = "", activePuzzleState = [], activePuzzleRemaining = [];
+    let activeCaptchaWord = "";
+    let activePuzzleTarget = "";
+    let activePuzzleState = [];
+    let activePuzzleRemaining = [];
+    
+    const captchaWords = ["ROOT", "HACKER", "CYBER", "CRYPTO", "SHELL", "BYTE", "ZERO", "ALPHA", "OMEGA", "GHOST"];
     
     function renderPuzzleUI() {
         const slots = document.getElementById('puzzleSlots');
         const pieces = document.getElementById('puzzlePieces');
         if (!slots || !pieces) return;
-        slots.innerHTML = activePuzzleState.map((v, i) => `<div class="puzzle-slot" data-slot="${i}">${v !== null ? v : "___"}</div>`).join('');
-        pieces.innerHTML = activePuzzleRemaining.map(p => `<div class="puzzle-piece" data-piece="${p}">${p}</div>`).join('');
+        
+        slots.innerHTML = activePuzzleState.map((v, i) => 
+            `<div class="puzzle-slot" data-slot="${i}">${v !== null ? escapeHtml(v) : "___"}</div>`
+        ).join('');
+        
+        pieces.innerHTML = activePuzzleRemaining.map(p => 
+            `<div class="puzzle-piece" data-piece="${escapeHtml(p)}">${escapeHtml(p)}</div>`
+        ).join('');
+        
         document.querySelectorAll('.puzzle-slot').forEach(slot => {
             slot.onclick = () => {
                 const idx = parseInt(slot.dataset.slot);
@@ -514,46 +706,63 @@
                 }
             };
         });
+        
         document.querySelectorAll('.puzzle-piece').forEach(piece => {
             piece.onclick = () => {
                 const val = piece.dataset.piece;
                 const empty = activePuzzleState.findIndex(s => s === null);
                 if (empty !== -1) {
                     activePuzzleState[empty] = val;
-                    activePuzzleRemaining = activePuzzleRemaining.filter(p => p !== val);
+                    const idx = activePuzzleRemaining.indexOf(val);
+                    if (idx !== -1) activePuzzleRemaining.splice(idx, 1);
                     renderPuzzleUI();
                 }
             };
         });
     }
     
-    function renderCaptchaFirst() {
-        const captcha = generateCaptcha();
-        activeCaptchaWord = captcha.original;
-        const puzzle = generateWordPuzzle();
-        activePuzzleTarget = puzzle.target;
-        activePuzzleState = new Array(activePuzzleTarget.length).fill(null);
-        activePuzzleRemaining = [...puzzle.letters];
+    function renderAuthScreen() {
+        const captchaWord = captchaWords[Math.floor(Math.random() * captchaWords.length)];
+        const shuffled = captchaWord.split('').sort(() => Math.random() - 0.5).join('');
+        activeCaptchaWord = captchaWord;
+        
+        const targetWord = captchaWords[Math.floor(Math.random() * captchaWords.length)];
+        const letters = targetWord.split('');
+        const shuffledLetters = [...letters].sort(() => Math.random() - 0.5);
+        activePuzzleTarget = targetWord;
+        activePuzzleState = new Array(targetWord.length).fill(null);
+        activePuzzleRemaining = [...shuffledLetters];
         
         contentArea.innerHTML = `
+            <div id="globalError" class="error-msg"></div>
             <div id="captchasContainer">
-                <div class="captcha-container"><div class="floating-word">${captcha.display}</div>
-                <input type="text" id="captchaInput" class="terminal-input" placeholder=">_ ENTER DECODED WORD"></div>
-                <div class="captcha-container"><div class="target-word">TARGET: ${activePuzzleTarget}</div>
-                <div class="puzzle-area" id="puzzleSlots"></div>
-                <div class="puzzle-area" id="puzzlePieces"></div>
-                <div style="font-size:10px; color:#00aa66; text-align:center;">Click letter → empty slot</div></div>
+                <div class="captcha-container">
+                    <div class="floating-word">${escapeHtml(shuffled)}</div>
+                    <input type="text" id="captchaInput" class="terminal-input" placeholder=">_ ENTER DECODED WORD" autocomplete="off">
+                </div>
+                <div class="captcha-container">
+                    <div class="target-word">TARGET: ${escapeHtml(targetWord)}</div>
+                    <div class="puzzle-area" id="puzzleSlots"></div>
+                    <div class="puzzle-area" id="puzzlePieces"></div>
+                    <div style="font-size:10px; color:#00aa66; text-align:center;">Click letter → empty slot</div>
+                </div>
             </div>
-            <button id="verifyBtn" class="btn">✓ ENTER SYSTEM ✓</button>
+            <button id="verifyBtn" class="btn">✓ VERIFY & ENTER ✓</button>
             <div id="authFormContainer" style="display: none;"></div>
         `;
         renderPuzzleUI();
         
-        document.getElementById('verifyBtn').onclick = async () => {
+        document.getElementById('verifyBtn').onclick = () => {
             const ans = document.getElementById('captchaInput').value.trim().toUpperCase();
-            if (ans !== activeCaptchaWord) { alert(`❌ WRONG! Expected: ${activeCaptchaWord}`); return; }
+            if (ans !== activeCaptchaWord) {
+                showError(`❌ Wrong! Expected: ${activeCaptchaWord}`);
+                return;
+            }
             const puzzleWord = activePuzzleState.join('');
-            if (puzzleWord !== activePuzzleTarget) { alert(`❌ WRONG PUZZLE! Need: ${activePuzzleTarget}`); return; }
+            if (puzzleWord !== activePuzzleTarget) {
+                showError(`❌ Wrong puzzle! Need: ${activePuzzleTarget}`);
+                return;
+            }
             
             document.getElementById('captchasContainer').style.opacity = '0';
             document.getElementById('verifyBtn').style.opacity = '0';
@@ -564,67 +773,95 @@
                 document.getElementById('authFormContainer').innerHTML = `
                     <div class="success-msg">✓ ACCESS GRANTED. WELCOME TO MARAUDER ✓</div>
                     <div class="auth-form">
-                        <input type="text" id="nicknameInput" class="terminal-input" placeholder="YOUR NICKNAME" value="ne0n_r1der">
-                        <input type="text" id="roomIdInput" class="terminal-input" placeholder="ROOM ID (to join existing)">
+                        <input type="text" id="nicknameInput" class="terminal-input" placeholder="YOUR NICKNAME" value="ne0n_r1der" autocomplete="off">
+                        <input type="text" id="roomIdInput" class="terminal-input" placeholder="ROOM ID (to join existing)" autocomplete="off">
                         <button id="createBtn" class="btn" style="margin-bottom: 10px;">⚡ CREATE NEW ROOM ⚡</button>
                         <button id="joinBtn" class="btn btn-secondary">🔗 JOIN ROOM BY ID</button>
                         <div id="authError" class="error-msg"></div>
                     </div>
                 `;
                 
-                let creating = false, joining = false;
+                let actionInProgress = false;
+                
                 document.getElementById('createBtn').onclick = async () => {
-                    if (creating) return;
+                    if (actionInProgress) return;
                     const nick = document.getElementById('nicknameInput').value.trim();
-                    if (!nick) { document.getElementById('authError').innerText = "Enter nickname"; return; }
-                    creating = true;
+                    if (!nick) { showError("Enter nickname"); return; }
+                    actionInProgress = true;
                     const btn = document.getElementById('createBtn');
-                    btn.disabled = true; btn.textContent = "⏳ CREATING...";
+                    btn.disabled = true;
+                    btn.textContent = "⏳ CREATING...";
+                    clearError();
+                    
                     try {
                         const res = await createRoom(nick, getDeviceInfo());
-                        if (!res.success) throw new Error("Create failed");
-                        currentUser = { nickname: nick, roomId: res.roomId, isHost: true, userId: res.userId, device: getDeviceInfo() };
-                        enterChatRoom(res.roomId, nick, true);
-                    } catch(e) { document.getElementById('authError').innerText = "Error: " + e.message; btn.disabled = false; btn.textContent = "⚡ CREATE NEW ROOM"; }
-                    finally { creating = false; }
+                        currentNickname = nick;
+                        currentRoomId = res.roomId;
+                        currentIsHost = true;
+                        cryptoKey = res.cryptoKey;
+                        await enterChatRoom();
+                    } catch (e) {
+                        showError("Create error: " + e.message);
+                        btn.disabled = false;
+                        btn.textContent = "⚡ CREATE NEW ROOM";
+                    } finally {
+                        actionInProgress = false;
+                    }
                 };
+                
                 document.getElementById('joinBtn').onclick = async () => {
-                    if (joining) return;
+                    if (actionInProgress) return;
                     const nick = document.getElementById('nicknameInput').value.trim();
                     const roomId = document.getElementById('roomIdInput').value.trim().toUpperCase();
-                    if (!nick) { document.getElementById('authError').innerText = "Enter nickname"; return; }
-                    if (!roomId) { document.getElementById('authError').innerText = "Enter room ID"; return; }
-                    joining = true;
+                    if (!nick) { showError("Enter nickname"); return; }
+                    if (!roomId) { showError("Enter room ID"); return; }
+                    actionInProgress = true;
                     const btn = document.getElementById('joinBtn');
-                    btn.disabled = true; btn.textContent = "⏳ JOINING...";
+                    btn.disabled = true;
+                    btn.textContent = "⏳ JOINING...";
+                    clearError();
+                    
                     try {
                         const res = await joinRoom(roomId, nick, getDeviceInfo());
-                        if (!res.success) throw new Error(res.error);
-                        currentUser = { nickname: nick, roomId: roomId, isHost: false, userId: res.userId, device: getDeviceInfo() };
-                        enterChatRoom(roomId, nick, false);
-                    } catch(e) { document.getElementById('authError').innerText = e.message; btn.disabled = false; btn.textContent = "🔗 JOIN ROOM BY ID"; }
-                    finally { joining = false; }
+                        currentNickname = nick;
+                        currentRoomId = roomId;
+                        currentIsHost = false;
+                        cryptoKey = res.cryptoKey;
+                        await enterChatRoom();
+                    } catch (e) {
+                        showError(e.message);
+                        btn.disabled = false;
+                        btn.textContent = "🔗 JOIN ROOM BY ID";
+                    } finally {
+                        actionInProgress = false;
+                    }
                 };
             }, 300);
         };
     }
     
-    async function enterChatRoom(roomId, myNick, isHost) {
+    async function enterChatRoom() {
+        if (!currentRoomId || !cryptoKey) return;
+        
         contentArea.innerHTML = `
+            <div id="globalError" class="error-msg"></div>
             <button id="leaveBtn" class="btn back-btn">← LEAVE ROOM</button>
             <div class="room-card">
                 <div style="text-align:center; font-size:12px; color:#00aa66;">ROOM ID</div>
-                <div class="room-code">${roomId}</div>
-                <div id="statusContainer"><div class="status-text waiting" id="statusMsg">⏳ Waiting for player...</div></div>
+                <div class="room-code">${escapeHtml(currentRoomId)}</div>
+                <div id="statusContainer">
+                    <div class="status-text waiting" id="statusMsg">⏳ Waiting for player...</div>
+                </div>
                 <div class="players-info">
-                    <span>👑 HOST: <span id="hostName">${isHost ? myNick : '...'}</span><span id="hostDevice" class="device-badge"></span></span>
-                    <span>🕹️ GUEST: <span id="guestName">${!isHost ? myNick : '...'}</span><span id="guestDevice" class="device-badge"></span></span>
+                    <span>👑 HOST: <span id="hostName">...</span><span id="hostDevice" class="device-badge"></span></span>
+                    <span>🕹️ GUEST: <span id="guestName">...</span><span id="guestDevice" class="device-badge"></span></span>
                 </div>
             </div>
-            <div class="chat-messages" id="messagesList"><div style="text-align:center; color:#00aa66; padding:20px;">💬 No messages yet</div></div>
-            <div id="typingIndicator" class="typing-indicator" style="min-height:24px;"></div>
+            <div class="chat-messages" id="messagesList">
+                <div style="text-align:center; color:#00aa66; padding:20px;">💬 No messages yet</div>
+            </div>
             <div class="input-row">
-                <input type="text" id="msgInput" class="terminal-input" placeholder=">_ TYPE MESSAGE...">
+                <input type="text" id="msgInput" class="terminal-input" placeholder=">_ TYPE MESSAGE..." autocomplete="off">
                 <button id="sendBtn" class="btn">→</button>
             </div>
         `;
@@ -637,17 +874,32 @@
         const guestNameSpan = document.getElementById('guestName');
         const guestDeviceSpan = document.getElementById('guestDevice');
         
-        // Room listener (realtime)
-        const roomRef = ref(db, `rooms/${roomId}`);
+        // Room listener
+        const roomRef = ref(db, `rooms/${currentRoomId}`);
+        if (roomUnsubscribe) off(roomUnsubscribe);
         roomUnsubscribe = onValue(roomRef, (snap) => {
-            if (!snap.exists()) { alert("Room closed by host"); exitToMenu(); return; }
+            if (!snap.exists()) {
+                showError("Room closed by host");
+                exitToMenu();
+                return;
+            }
             const room = snap.val();
-            if (room.host) { hostNameSpan.innerText = room.host.nickname; hostDeviceSpan.innerText = room.host.device || ''; }
-            if (room.guest) { guestNameSpan.innerText = room.guest.nickname; guestDeviceSpan.innerText = room.guest.device || ''; }
-            else { guestNameSpan.innerText = '—'; guestDeviceSpan.innerText = ''; }
+            
+            if (room.host) {
+                hostNameSpan.innerText = escapeHtml(room.host.nickname);
+                hostDeviceSpan.innerText = room.host.device || '';
+            }
+            
+            if (room.guest) {
+                guestNameSpan.innerText = escapeHtml(room.guest.nickname);
+                guestDeviceSpan.innerText = room.guest.device || '';
+            } else {
+                guestNameSpan.innerText = '—';
+                guestDeviceSpan.innerText = '';
+            }
             
             if (room.status === "playing" && room.guest) {
-                statusMsg.innerText = "✅ Player connected! Chat ready.";
+                statusMsg.innerText = "✅ CONNECTED - Chat ready";
                 statusContainer.className = "status-text connected";
             } else {
                 statusMsg.innerText = "⏳ Waiting for player to join...";
@@ -655,66 +907,112 @@
             }
         });
         
-        // Messages listener (realtime)
-        const messagesRef = ref(db, `rooms/${roomId}/messages`);
-        messagesUnsubscribe = onValue(messagesRef, (snap) => {
-            if (messagesDiv.children.length === 1 && messagesDiv.children[0].innerText.includes("No messages")) messagesDiv.innerHTML = '';
+        // Messages listener
+        const messagesRef = ref(db, `rooms/${currentRoomId}/messages`);
+        if (messagesUnsubscribe) off(messagesUnsubscribe);
+        messagesUnsubscribe = onValue(messagesRef, async (snap) => {
+            messagesDiv.innerHTML = '';
             const msgs = [];
             snap.forEach(child => msgs.push({ id: child.key, ...child.val() }));
             msgs.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-            msgs.forEach(msg => {
-                const isOwn = msg.sender === myNick;
+            
+            if (msgs.length === 0) {
+                messagesDiv.innerHTML = '<div style="text-align:center; color:#00aa66; padding:20px;">💬 No messages yet</div>';
+                return;
+            }
+            
+            for (const msg of msgs) {
+                let displayText = "[ENCRYPTED]";
+                
+                if (msg.encrypted && msg.iv && msg.data) {
+                    const decrypted = await decryptMessage(cryptoKey, msg.iv, msg.data);
+                    if (decrypted) displayText = decrypted;
+                } else if (msg.text) {
+                    displayText = msg.text;
+                }
+                
+                const isOwn = msg.sender === currentNickname;
                 const div = document.createElement('div');
                 div.className = `message ${isOwn ? 'own' : ''}`;
-                div.innerHTML = `<div class="message-bubble"><div class="message-text">${escapeHtml(msg.text)}</div></div>
-                                <div class="message-meta">${isOwn ? 'YOU' : escapeHtml(msg.sender)} • ${new Date(msg.timestamp).toLocaleTimeString()}</div>`;
+                div.innerHTML = `
+                    <div class="message-bubble">
+                        <div class="message-text">${escapeHtml(displayText)}</div>
+                    </div>
+                    <div class="message-meta">${escapeHtml(msg.sender)} • ${new Date(msg.timestamp).toLocaleTimeString()}</div>
+                `;
                 messagesDiv.appendChild(div);
-            });
+            }
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         });
         
         // Send message
         const msgInput = document.getElementById('msgInput');
         const sendBtn = document.getElementById('sendBtn');
-        let typingTimer = null;
-        msgInput.addEventListener('input', () => {
-            clearTimeout(typingTimer);
-            const ind = document.getElementById('typingIndicator');
-            if (ind) ind.innerHTML = '✍️ TYPING...';
-            typingTimer = setTimeout(() => { const ind = document.getElementById('typingIndicator'); if (ind) ind.innerHTML = ''; }, 1000);
-        });
-        const sendMsg = async () => {
+        
+        const sendMessage = async () => {
             const text = msgInput.value.trim();
             if (text) {
-                await sendMessage(roomId, text, myNick);
-                msgInput.value = '';
-                const ind = document.getElementById('typingIndicator');
-                if (ind) ind.innerHTML = '';
+                const success = await sendEncryptedMessage(currentRoomId, text);
+                if (success) msgInput.value = '';
             }
         };
-        sendBtn.onclick = sendMsg;
-        msgInput.onkeypress = (e) => { if (e.key === 'Enter') sendMsg(); };
         
+        sendBtn.onclick = sendMessage;
+        msgInput.onkeypress = (e) => {
+            if (e.key === 'Enter') sendMessage();
+        };
+        
+        // Leave button
         document.getElementById('leaveBtn').onclick = async () => {
-            await leaveRoom(roomId, currentUser.userId, isHost);
+            await leaveRoom();
             exitToMenu();
         };
     }
     
     function exitToMenu() {
-        if (roomUnsubscribe) off(roomUnsubscribe);
-        if (messagesUnsubscribe) off(messagesUnsubscribe);
-        currentUser = { nickname: null, roomId: null, isHost: false, userId: null, device: getDeviceInfo() };
-        renderCaptchaFirst();
+        stopTitleAnimation();
+        cryptoKey = null;
+        currentRoomId = null;
+        currentIsHost = false;
+        renderAuthScreen();
+        animateTitle();
     }
     
-    function escapeHtml(str) { if (!str) return ''; return str.replace(/[&<>]/g, m => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;' }[m])); }
-    
-    if (!firebaseReady) {
-        contentArea.innerHTML = `<div style="color:#ff6666;text-align:center;padding:20px;">⚠️ Firebase config error. Replace with your project credentials.</div>`;
-    } else {
-        renderCaptchaFirst();
+    // ========== ИНИЦИАЛИЗАЦИЯ ==========
+    async function initFirebase() {
+        try {
+            app = initializeApp(firebaseConfig);
+            auth = getAuth(app);
+            db = getDatabase(app);
+            
+            await signInAnonymously(auth);
+            
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    firebaseUser = user;
+                    currentUserId = user.uid;
+                    renderAuthScreen();
+                    animateTitle();
+                } else {
+                    contentArea.innerHTML = `<div style="color:#ff6666;text-align:center;padding:20px;">
+                        ⚠️ Authentication failed. Please refresh the page.<br>
+                        Make sure Anonymous Auth is enabled in Firebase Console.
+                    </div>`;
+                }
+            });
+        } catch (e) {
+            console.error("Firebase init error:", e);
+            contentArea.innerHTML = `<div style="color:#ff6666;text-align:center;padding:20px;">
+                ⚠️ Firebase configuration error.<br><br>
+                Please check:<br>
+                1. Enable Anonymous Auth in Firebase Console<br>
+                2. Add your domain to Authorized Domains<br>
+                3. Verify databaseURL in config
+            </div>`;
+        }
     }
+    
+    initFirebase();
 </script>
 </body>
 </html>
